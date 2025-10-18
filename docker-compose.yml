@@ -1,0 +1,184 @@
+version: '3.8'
+
+services:
+  opensearch_container:
+    build:
+      context: ./opensearch_db
+    container_name: opensearch_container
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"
+      - "plugins.security.disabled=true"
+      - "network.host=0.0.0.0"
+      - "http.cors.enabled=true"
+      - "http.cors.allow-origin=*"
+      - "path.repo=/usr/share/opensearch/backups"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+      - opensearch-backups:/usr/share/opensearch/backups
+    networks:
+      - rag_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=50s"]
+      interval: 60s
+      timeout: 50s
+      retries: 3
+      start_period: 120s
+
+  embedding_container:
+    build:
+      context: ./embedding
+    container_name: embedding_container
+    depends_on:
+      opensearch_container:
+        condition: service_healthy
+    networks:
+      - rag_network
+    volumes:
+      - ./embedding/pdf_corpus:/app/pdf_corpus:ro
+      - ./embedding/index:/app/index
+    environment:
+      - WATCH_INTERVAL=60
+      - OPENSEARCH_ENDPOINT=http://opensearch_container:9200
+    #restart: unless-stopped
+    #restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import os; os.access(\"/app/index/index.pkl\", os.R_OK) or exit(1)'"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  search_api_container:
+    build:
+      context: ./search_api
+    container_name: search_api_container
+    ports:
+      - "8005:8005"
+    depends_on:
+      embedding_container:
+        condition: service_healthy
+      opensearch_container:
+        condition: service_healthy
+    environment:
+      - OPENSEARCH_URL=http://opensearch_container:9200
+    networks:
+      - rag_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8005/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  backend_container:
+    build:
+      context: ./backend
+    container_name: backend_container
+    ports:
+      - "8006:8006"
+    depends_on:
+      search_api_container:
+        condition: service_healthy
+      ollama_container:
+        condition: service_healthy
+    environment:
+      - SEARCH_API_URL=http://search_api_container:8005
+      - OLLAMA_URL=http://ollama_container:11434
+    networks:
+      - rag_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8006/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend_container:
+    build:
+      context: ./frontend
+    container_name: frontend_container
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend_container:
+        condition: service_healthy
+    environment:
+      - BACKEND_URL=http://backend_container:8006
+    networks:
+      - rag_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  ollama_container:
+    build:
+      context: ./ollama_llm
+    container_name: ollama_container
+    ports:
+      - "11434:11434"
+    environment:
+      - MODEL_NAME=qwen2.5:0.5b
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - rag_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434 || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 300s
+
+volumes:
+  opensearch-data:
+  opensearch-backups:
+  ollama-data:
+
+networks:
+  rag_network:
+    driver: bridge
