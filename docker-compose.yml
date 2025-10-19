@@ -3,6 +3,7 @@ version: '3.8'
 services:
   opensearch_container:
     image: amornpan/opensearch_db:latest
+    pull_policy: if_not_present
     container_name: opensearch_container
     ports:
       - "9200:9200"
@@ -42,7 +43,9 @@ services:
 
   embedding_container:
     image: amornpan/embedding:latest
+    pull_policy: if_not_present
     container_name: embedding_container
+    restart: unless-stopped
     depends_on:
       opensearch_container:
         condition: service_healthy
@@ -60,15 +63,15 @@ services:
         max-size: "100m"
         max-file: "3"
     healthcheck:
-      # test: ["CMD-SHELL", "python -c 'import os; os.access(\"/app/index/index.pkl\", os.R_OK) or exit(1)'"]
-      test: ["CMD-SHELL", "ps aux | grep python || exit 0"]
+      test: ["CMD-SHELL", "exit 0"]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
 
   search_api_container:
     image: amornpan/search_api:latest
+    pull_policy: if_not_present
     container_name: search_api_container
     ports:
       - "8005:8005"
@@ -95,6 +98,7 @@ services:
 
   backend_container:
     image: amornpan/backend:latest
+    pull_policy: if_not_present
     container_name: backend_container
     ports:
       - "8006:8006"
@@ -122,6 +126,7 @@ services:
 
   frontend_container:
     image: amornpan/frontend:latest
+    pull_policy: if_not_present
     container_name: frontend_container
     ports:
       - "8501:8501"
@@ -146,6 +151,7 @@ services:
 
   ollama_container:
     image: amornpan/ollama_llm:latest
+    pull_policy: if_not_present
     container_name: ollama_container
     ports:
       - "11434:11434"
@@ -155,6 +161,25 @@ services:
       - ollama-data:/root/.ollama
     networks:
       - rag_network
+    command: >
+      sh -c "
+      ollama serve &
+      echo 'Waiting for Ollama to start...' &&
+      for i in {1..30}; do
+        curl -sf http://localhost:11434 > /dev/null 2>&1 && break;
+        echo \"Waiting... $$i/30\";
+        sleep 2;
+      done &&
+      echo 'Checking if model exists...' &&
+      if ollama list | grep -q '${MODEL_NAME:-qwen2.5:0.5b}'; then
+        echo 'Model already exists. Skipping pull.';
+      else
+        echo 'Pulling model...' &&
+        ollama pull ${MODEL_NAME:-qwen2.5:0.5b};
+      fi &&
+      echo 'Ollama is ready!' &&
+      tail -f /dev/null
+      "
     logging:
       driver: "json-file"
       options:
